@@ -1,0 +1,47 @@
+; Проект «Gothic Manor — Догорающая свеча».
+; Уровень собирается скриптом tools/build_level.gd в scenes/level.tscn.
+
+config_version=5
+
+[application]
+
+config/name="Gothic Manor — Догорающая свеча"
+run/main_scene="res://scenes/level.tscn"
+config/features=PackedStringArray("4.7", "Forward Plus")
+
+[autoload]
+
+ScareLedger="*res://scripts/scare_ledger.gd"
+
+[display]
+
+window/size/viewport_width=1600
+window/size/viewport_height=900
+
+[importer_defaults]
+
+scene={
+"import_script/path": "res://assets/gothic_manor/godot/manor_post_import.gd"
+}
+
+[physics]
+
+3d/physics_engine="Jolt Physics"
+common/physics_ticks_per_second=120
+
+[shader_globals]
+
+candle_pos={
+"type": "vec3",
+"value": Vector3(0, 0, 0)
+}
+candle_energy={
+"type": "float",
+"value": 0.0
+}
+
+[rendering]
+
+anti_aliasing/quality/screen_space_aa=1
+lights_and_shadows/positional_shadow/atlas_size=4096
+environment/volumetric_fog/volume_size=96

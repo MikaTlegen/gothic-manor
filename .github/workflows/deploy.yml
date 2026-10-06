@@ -1,0 +1,263 @@
+# Сборка Godot-игры под Web и деплой на GitHub Pages.
+# - push в main и ручной запуск (workflow_dispatch) с main: сборка + деплой;
+# - pull_request в main: только сборка (проверка, что экспорт проходит).
+# Godot и шаблоны экспорта качаются с официальных релизов godotengine
+# с проверкой SHA512; сторонние экшены/образы не используются.
+
+name: Web build & GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# По умолчанию — минимальные права; деплой-джоб расширяет их для себя.
+permissions:
+  contents: read
+
+env:
+  GODOT_VERSION: "4.7.2"
+  GODOT_RELEASE: "4.7.2-stable"
+  # Имя каталога шаблонов должно совпадать с templates/version.txt из tpz.
+  GODOT_TEMPLATES_DIR: "4.7.2.stable"
+  # Имя пресета из export_presets.cfg и путь экспорта.
+  EXPORT_PRESET: "Web"
+  EXPORT_DIR: "build/web"
+
+defaults:
+  run:
+    # Явный bash => -eo pipefail: ошибка в любой части пайпа валит шаг.
+    shell: bash
+
+jobs:
+  build:
+    name: Сборка Web
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    # Новые пуши в ту же ветку/PR отменяют устаревшую сборку.
+    concurrency:
+      group: web-build-${{ github.ref }}
+      cancel-in-progress: true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Проверка наличия export_presets.cfg
+        run: |
+          if [[ ! -f export_presets.cfg ]]; then
+            echo "::error::Нет export_presets.cfg — экспорт невозможен"
+            exit 1
+          fi
+          if ! grep -q "^name=\"${EXPORT_PRESET}\"" export_presets.cfg; then
+            echo "::error::В export_presets.cfg нет пресета \"${EXPORT_PRESET}\""
+            exit 1
+          fi
+
+      # ---------- Godot + шаблоны экспорта (кэшируются, ~100 МБ) ----------
+      - name: Кэш Godot и шаблонов
+        id: godot-cache
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/godot-bin
+            ~/.local/share/godot/export_templates/${{ env.GODOT_TEMPLATES_DIR }}
+          # Суффикс -v1 — ручной сброс кэша при изменении набора шаблонов.
+          key: godot-${{ env.GODOT_RELEASE }}-${{ runner.os }}-web-nothreads-v1
+
+      - name: Скачивание Godot и шаблонов (только при промахе кэша)
+        if: steps.godot-cache.outputs.cache-hit != 'true'
+        run: |
+          base="https://github.com/godotengine/godot/releases/download/${GODOT_RELEASE}"
+          bin_zip="Godot_v${GODOT_RELEASE}_linux.x86_64.zip"
+          tpz="Godot_v${GODOT_RELEASE}_export_templates.tpz"
+          tmp="${RUNNER_TEMP}/godot-dl"
+          mkdir -p "$tmp"
+          cd "$tmp"
+
+          echo "Скачиваю бинарник, шаблоны (~1.28 ГБ) и контрольные суммы"
+          curl -fsSL --retry 3 -o SHA512-SUMS.txt "${base}/SHA512-SUMS.txt"
+          curl -fsSL --retry 3 -o "$bin_zip" "${base}/${bin_zip}"
+          curl -fsSL --retry 3 -o "$tpz" "${base}/${tpz}"
+
+          echo "Проверяю SHA512"
+          grep -E "  (${bin_zip}|${tpz})$" SHA512-SUMS.txt > sums.txt
+          [[ $(wc -l < sums.txt) -eq 2 ]] || { echo "::error::Не найдены суммы в SHA512-SUMS.txt"; exit 1; }
+          sha512sum -c sums.txt
+
+          echo "Распаковываю бинарник"
+          mkdir -p ~/godot-bin
+          unzip -q -o "$bin_zip" -d ~/godot-bin
+          mv ~/godot-bin/Godot_v${GODOT_RELEASE}_linux.x86_64 ~/godot-bin/godot
+          chmod +x ~/godot-bin/godot
+
+          echo "Извлекаю из tpz только Web-шаблоны без потоков"
+          dest=~/.local/share/godot/export_templates/${GODOT_TEMPLATES_DIR}
+          mkdir -p "$dest"
+          unzip -q -o -j "$tpz" \
+            templates/web_nothreads_release.zip \
+            templates/web_nothreads_debug.zip \
+            templates/version.txt \
+            -d "$dest"
+
+          # Сверка версии шаблонов с ожидаемой
+          [[ "$(tr -d '[:space:]' < "$dest/version.txt")" == "${GODOT_TEMPLATES_DIR}" ]] \
+            || { echo "::error::Версия шаблонов не совпадает"; exit 1; }
+
+          cd /
+          rm -rf "$tmp"
+
+      - name: Godot в PATH
+        run: |
+          echo "$HOME/godot-bin" >> "$GITHUB_PATH"
+          "$HOME/godot-bin/godot" --version
+          ls -la ~/.local/share/godot/export_templates/${GODOT_TEMPLATES_DIR}
+
+      # ---------- Импорт ассетов (кэш .godot/imported) ----------
+      # restore и save разделены: импорт сохраняется в кэш, даже если
+      # потом упадёт экспорт (иначе каждый ретрай импортировал бы всё заново).
+      - name: Восстановление кэша импорта
+        id: import-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: .godot/imported
+          key: godot-import-${{ env.GODOT_RELEASE }}-${{ hashFiles('assets/**', '**/*.import') }}
+          restore-keys: |
+            godot-import-${{ env.GODOT_RELEASE }}-
+
+      - name: Импорт ассетов
+        id: import
+        run: |
+          log="${RUNNER_TEMP}/import.log"
+          set +e
+          timeout 40m godot --headless --path . --import 2>&1 | tee "$log"
+          code=${PIPESTATUS[0]}
+          set -e
+
+          if [[ $code -eq 124 ]]; then
+            echo "::error::Импорт не уложился в 40 минут"
+            exit 1
+          fi
+
+          # Ошибки импорта ресурсов — валим сборку при любом коде выхода.
+          # (Ошибки скриптов проверяются отдельным шагом ПОСЛЕ сохранения кэша,
+          # чтобы опечатка в .gd не выбрасывала 330 МБ готового импорта.)
+          if grep -E "Error importing|Failed to import" "$log"; then
+            echo "::error::Импорт ассетов завершился с ошибками (см. строки выше)"
+            exit 1
+          fi
+
+          # Ненулевой код без критичных строк (типично для первого импорта
+          # с нуля: предупреждения о ещё не импортированных зависимостях) —
+          # только предупреждение. Реальные проблемы поймает экспорт ниже.
+          if [[ $code -ne 0 ]]; then
+            echo "::warning::godot --import вернул код $code без критичных ошибок; продолжаю"
+            grep -E "^(ERROR|WARNING):" "$log" | sort | uniq -c | sort -rn | head -30 || true
+          fi
+
+          count=$(find .godot/imported -type f 2>/dev/null | wc -l)
+          echo "Файлов в .godot/imported: $count"
+          [[ $count -gt 0 ]] || { echo "::error::.godot/imported пуст — импорт не выполнен"; exit 1; }
+
+      - name: Сохранение кэша импорта
+        if: steps.import-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: .godot/imported
+          # Ключ, вычисленный ДО импорта: импорт может переписать .import-файлы.
+          key: ${{ steps.import-cache.outputs.cache-primary-key }}
+
+      - name: Проверка лога импорта на ошибки скриптов
+        run: |
+          # Godot не всегда отражает ошибки GDScript в коде выхода.
+          if grep -E "SCRIPT ERROR|Parse Error|Failed to load script" "${RUNNER_TEMP}/import.log"; then
+            echo "::error::Ошибки скриптов при импорте (см. строки выше)"
+            exit 1
+          fi
+
+      # ---------- Экспорт ----------
+      - name: Экспорт Web (release)
+        run: |
+          mkdir -p "$EXPORT_DIR"
+          log="${RUNNER_TEMP}/export.log"
+          set +e
+          timeout 20m godot --headless --path . --export-release "$EXPORT_PRESET" "$EXPORT_DIR/index.html" 2>&1 | tee "$log"
+          code=${PIPESTATUS[0]}
+          set -e
+
+          if [[ $code -ne 0 ]]; then
+            echo "::error::Экспорт завершился с кодом $code"
+            exit 1
+          fi
+          # Экспорт возвращает 0 даже при ошибках парсинга скриптов —
+          # проверяем лог явно.
+          if grep -E "SCRIPT ERROR|Parse Error|Failed to load script" "$log"; then
+            echo "::error::Ошибки скриптов при экспорте (см. строки выше)"
+            exit 1
+          fi
+
+      - name: Проверка результата и размеров
+        run: |
+          shopt -s nullglob
+          [[ -f "$EXPORT_DIR/index.html" ]] || { echo "::error::Нет $EXPORT_DIR/index.html"; exit 1; }
+          pcks=("$EXPORT_DIR"/*.pck)
+          [[ ${#pcks[@]} -gt 0 ]] || { echo "::error::Нет .pck в $EXPORT_DIR"; exit 1; }
+          wasm=("$EXPORT_DIR"/*.wasm)
+          [[ ${#wasm[@]} -gt 0 ]] || { echo "::error::Нет .wasm в $EXPORT_DIR"; exit 1; }
+
+          echo "Содержимое $EXPORT_DIR:"
+          ls -la "$EXPORT_DIR"
+          du -sh "$EXPORT_DIR"
+
+          # Лимиты GitHub Pages: опубликованный сайт <= 1 ГБ (жёстко),
+          # деплой <= 10 минут. Лимит 100 МБ на файл относится к git-пушу,
+          # а не к артефакту Pages; крупные файлы — только предупреждение
+          # (сейчас index.pck ~282 МБ, index.wasm ~40 МБ).
+          total=$(du -sb "$EXPORT_DIR" | cut -f1)
+          if (( total > 1000000000 )); then
+            echo "::error::Сборка ${total} байт превышает лимит Pages 1 ГБ"
+            exit 1
+          fi
+          echo "Итого: $((total / 1024 / 1024)) МБ (лимит Pages 1 ГБ)"
+          for f in "$EXPORT_DIR"/*; do
+            size=$(stat -c %s "$f")
+            echo "$(basename "$f"): $((size / 1024 / 1024)) МБ"
+            if (( size > 100 * 1024 * 1024 )); then
+              echo "::warning::$(basename "$f") больше 100 МБ ($((size / 1024 / 1024)) МБ) — долгая первая загрузка в браузере"
+            fi
+          done
+
+      - name: Загрузка артефакта Pages
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: ${{ env.EXPORT_DIR }}
+
+  deploy:
+    name: Деплой на GitHub Pages
+    needs: build
+    # Только push в main и ручной запуск с main; для PR деплоя нет.
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    # Деплои идут строго по очереди, начатый деплой не отменяется.
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Настройка Pages
+        uses: actions/configure-pages@v6
+
+      - name: Деплой
+        id: deployment
+        uses: actions/deploy-pages@v5

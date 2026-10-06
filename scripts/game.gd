@@ -67,7 +67,11 @@ func _ready() -> void:
 	sfx_fire.play()
 	sfx_ambience.play()
 	ScareFX.prewarm(player.camera)
-	_intro()
+	# В браузере звук и захват мыши доступны только после клика — сначала экран «Кликни, чтобы войти»
+	if OS.has_feature("web"):
+		WebStartGate.show_over(self, _intro)
+	else:
+		_intro()
 
 
 func _define_input() -> void:

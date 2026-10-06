@@ -43,7 +43,8 @@ func _ready() -> void:
 	floor_max_angle = deg_to_rad(50.0)
 	floor_snap_length = 0.35
 	_last_pos = global_position
-	if not OS.get_cmdline_user_args().has("--autotest"):
+	# В браузере захват мыши без жеста отклоняется — там его делает экран старта (web_start_gate.gd)
+	if not OS.get_cmdline_user_args().has("--autotest") and not OS.has_feature("web"):
 		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 
 

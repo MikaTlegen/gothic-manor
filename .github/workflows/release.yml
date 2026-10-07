@@ -1,0 +1,166 @@
+# Сборка Windows-версии и публикация в GitHub Releases.
+# Запуск: push тега вида v1.0 (git tag v1.0 && git push origin v1.0).
+# Результат — релиз с GothicManor.exe (ресурсы вшиты, запуск двойным кликом) и тем же exe в zip.
+# Godot и шаблоны экспорта — с официальных релизов godotengine с проверкой SHA512.
+
+name: Windows release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+env:
+  GODOT_RELEASE: "4.7.2-stable"
+  GODOT_TEMPLATES_DIR: "4.7.2.stable"
+  EXPORT_PRESET: "Windows Desktop"
+  EXPORT_DIR: "build/windows"
+  EXE_NAME: "GothicManor.exe"
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  release:
+    name: Сборка Windows и релиз
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: write          # создание релиза и загрузка файлов
+    concurrency:
+      group: release-${{ github.ref }}
+      cancel-in-progress: false
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      # ---------- Godot + шаблоны Windows (кэшируются) ----------
+      - name: Кэш Godot и шаблонов
+        id: godot-cache
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/godot-bin
+            ~/.local/share/godot/export_templates/${{ env.GODOT_TEMPLATES_DIR }}
+          key: godot-${{ env.GODOT_RELEASE }}-${{ runner.os }}-windows-v1
+
+      - name: Скачивание Godot и шаблонов (только при промахе кэша)
+        if: steps.godot-cache.outputs.cache-hit != 'true'
+        run: |
+          base="https://github.com/godotengine/godot/releases/download/${GODOT_RELEASE}"
+          bin_zip="Godot_v${GODOT_RELEASE}_linux.x86_64.zip"
+          tpz="Godot_v${GODOT_RELEASE}_export_templates.tpz"
+          tmp="${RUNNER_TEMP}/godot-dl"
+          mkdir -p "$tmp" && cd "$tmp"
+
+          curl -fsSL --retry 3 -o SHA512-SUMS.txt "${base}/SHA512-SUMS.txt"
+          curl -fsSL --retry 3 -o "$bin_zip" "${base}/${bin_zip}"
+          curl -fsSL --retry 3 -o "$tpz" "${base}/${tpz}"
+
+          echo "Проверяю SHA512"
+          grep -E "  (${bin_zip}|${tpz})$" SHA512-SUMS.txt > sums.txt
+          [[ $(wc -l < sums.txt) -eq 2 ]] || { echo "::error::Не найдены суммы в SHA512-SUMS.txt"; exit 1; }
+          sha512sum -c sums.txt
+
+          mkdir -p ~/godot-bin
+          unzip -q -o "$bin_zip" -d ~/godot-bin
+          mv ~/godot-bin/Godot_v${GODOT_RELEASE}_linux.x86_64 ~/godot-bin/godot
+          chmod +x ~/godot-bin/godot
+
+          echo "Извлекаю из tpz только шаблоны Windows x86_64"
+          dest=~/.local/share/godot/export_templates/${GODOT_TEMPLATES_DIR}
+          mkdir -p "$dest"
+          unzip -q -o -j "$tpz" \
+            templates/windows_release_x86_64.exe \
+            templates/windows_debug_x86_64.exe \
+            templates/version.txt \
+            -d "$dest"
+          [[ "$(tr -d '[:space:]' < "$dest/version.txt")" == "${GODOT_TEMPLATES_DIR}" ]] \
+            || { echo "::error::Версия шаблонов не совпадает"; exit 1; }
+
+          cd / && rm -rf "$tmp"
+
+      - name: Godot в PATH
+        run: |
+          echo "$HOME/godot-bin" >> "$GITHUB_PATH"
+          "$HOME/godot-bin/godot" --version
+
+      # ---------- Импорт ассетов (общий кэш с веб-сборкой) ----------
+      - name: Восстановление кэша импорта
+        uses: actions/cache/restore@v6
+        with:
+          path: .godot/imported
+          key: godot-import-${{ env.GODOT_RELEASE }}-${{ hashFiles('assets/**', '**/*.import') }}
+          restore-keys: |
+            godot-import-${{ env.GODOT_RELEASE }}-
+
+      - name: Импорт ассетов
+        run: |
+          log="${RUNNER_TEMP}/import.log"
+          set +e
+          timeout 40m godot --headless --path . --import 2>&1 | tee "$log"
+          code=${PIPESTATUS[0]}
+          set -e
+          [[ $code -ne 124 ]] || { echo "::error::Импорт не уложился в 40 минут"; exit 1; }
+          if grep -E "Error importing|Failed to import|SCRIPT ERROR|Parse Error|Failed to load script" "$log"; then
+            echo "::error::Ошибки при импорте (см. строки выше)"
+            exit 1
+          fi
+          [[ $code -eq 0 ]] || echo "::warning::godot --import вернул код $code без критичных ошибок"
+
+      # ---------- Экспорт ----------
+      - name: Экспорт Windows (release, ресурсы вшиты в exe)
+        run: |
+          mkdir -p "$EXPORT_DIR"
+          log="${RUNNER_TEMP}/export.log"
+          set +e
+          timeout 20m godot --headless --path . --export-release "$EXPORT_PRESET" "$EXPORT_DIR/$EXE_NAME" 2>&1 | tee "$log"
+          code=${PIPESTATUS[0]}
+          set -e
+          [[ $code -eq 0 ]] || { echo "::error::Экспорт завершился с кодом $code"; exit 1; }
+          # Экспорт возвращает 0 даже при ошибках скриптов — проверяем лог
+          if grep -E "SCRIPT ERROR|Parse Error|Failed to load script" "$log"; then
+            echo "::error::Ошибки скриптов при экспорте"
+            exit 1
+          fi
+          [[ -f "$EXPORT_DIR/$EXE_NAME" ]] || { echo "::error::Нет $EXE_NAME"; exit 1; }
+          # При embed_pck отдельного .pck быть не должно
+          if ls "$EXPORT_DIR"/*.pck >/dev/null 2>&1; then
+            echo "::warning::Найден отдельный .pck — ресурсы не вшиты в exe"
+          fi
+          ls -la "$EXPORT_DIR"
+
+      - name: Упаковка в zip
+        run: |
+          cd "$EXPORT_DIR"
+          zip -9 -q "GothicManor-${GITHUB_REF_NAME}-windows.zip" "$EXE_NAME"
+          ls -la
+
+      # ---------- Релиз ----------
+      - name: Публикация релиза
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          notes="${RUNNER_TEMP}/notes.md"
+          cat > "$notes" <<'EOF'
+          ## Как играть (Windows 10/11, 64-бит)
+          1. Скачайте **GothicManor.exe** ниже (или zip — если exe не пропускает браузер/почта).
+          2. Запустите двойным кликом. Установка не нужна.
+          3. Если появится окно «Windows защитила ваш компьютер» — нажмите **Подробнее** → **Выполнить в любом случае**
+             (файл не подписан цифровой подписью — для некоммерческого проекта это нормально).
+
+          Управление: WASD — идти, Shift — бежать, ПКМ — прикрыть пламя ладонью, Esc — отпустить мышь, R — заново.
+          Нужна видеокарта с поддержкой Vulkan. Титры и лицензии — CREDITS.md.
+
+          Веб-версия без скачивания: https://mikatlegen.github.io/gothic-manor/
+          EOF
+          sed -i 's/^          //' "$notes"
+          gh release create "$GITHUB_REF_NAME" \
+            "$EXPORT_DIR/$EXE_NAME" \
+            "$EXPORT_DIR/GothicManor-${GITHUB_REF_NAME}-windows.zip" \
+            --title "Gothic Manor ${GITHUB_REF_NAME}" \
+            --notes-file "$notes"

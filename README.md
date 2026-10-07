@@ -2,9 +2,19 @@
 
 Хоррор-локация на Godot 4.7 (Forward+). Игрок появляется в темноте с одной свечой и должен найти «Свою комнату», пока свеча не догорела.
 
-**▶ Играть в браузере: https://mikatlegen.github.io/gothic-manor/** — игра грузится сразу (~320 МБ при первом заходе), один клик — и вы внутри. Нужен десктопный браузер с WebGL 2 (Chrome, Edge, Firefox) и мышь.
+**⬇ Скачать для Windows (рекомендуется): https://github.com/MikaTlegen/gothic-manor/releases/latest** — один файл `GothicManor.exe`, запуск двойным кликом, установка не нужна. Полная графика и звук без задержек. Если Windows покажет «Windows защитила ваш компьютер» — «Подробнее» → «Выполнить в любом случае» (файл без цифровой подписи).
+
+**▶ Играть в браузере: https://mikatlegen.github.io/gothic-manor/** — без скачивания, но графика проще, а звук на слабых ПК может прерываться. Нужен десктопный браузер с WebGL 2 (Chrome, Edge, Firefox) и мышь.
 
 Титры и атрибуция — [CREDITS.md](CREDITS.md).
+
+## Релиз Windows
+- `.github/workflows/release.yml`: push тега `v*` собирает пресет «Windows Desktop» (ресурсы вшиты в exe, `embed_pck`) и публикует GitHub Release с `GothicManor.exe` и zip.
+- Новая версия:
+  ```bash
+  git tag v1.1
+  git push origin v1.1
+  ```
 
 ## Веб-версия и CI/CD
 - Каждый push в `main` собирает Web-экспорт и публикует его на GitHub Pages (`.github/workflows/deploy.yml`); pull request в `main` — только проверочная сборка. Godot 4.7.2 и шаблоны качаются с официальных релизов (проверка SHA512), импорт кэшируется.

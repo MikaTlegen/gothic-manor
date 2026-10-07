@@ -9,6 +9,13 @@ config/name="Gothic Manor — Догорающая свеча"
 run/main_scene="res://scenes/level.tscn"
 config/features=PackedStringArray("4.7", "Forward Plus")
 
+[audio]
+
+; Веб: полный микшер Godot (реверберация шин, фильтры 3D) вместо облегчённого режима Sample.
+; Сборка без потоков микширует звук между кадрами — при 12–20 FPS буфер 50 мс рвётся, поэтому 200 мс.
+general/default_playback_type.web=0
+driver/output_latency.web=200
+
 [autoload]
 
 ScareLedger="*res://scripts/scare_ledger.gd"
